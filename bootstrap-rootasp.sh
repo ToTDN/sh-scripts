@@ -262,6 +262,304 @@ configure_syslog() {
     esac
 }
 
+# Detect GPU
+detect_gpu() {
+    echo "Detecting GPU hardware..."
+
+    # Install lspci if not available
+    if ! command -v lspci &>/dev/null; then
+        if [ "$OS_TYPE" = "debian" ]; then
+            apt-get install -y pciutils
+        elif [ "$OS_TYPE" = "rhel" ]; then
+            if command -v dnf &>/dev/null; then
+                dnf install -y pciutils
+            else
+                yum install -y pciutils
+            fi
+        fi
+    fi
+
+    GPU_TYPE="none"
+    GPU_DETECTED=0
+
+    # Check for NVIDIA GPU
+    if lspci | grep -i nvidia | grep -iq "vga\|3d\|display"; then
+        GPU_TYPE="nvidia"
+        GPU_DETECTED=1
+        GPU_MODEL=$(lspci | grep -i nvidia | grep -i "vga\|3d\|display" | head -n1)
+        echo "NVIDIA GPU detected: $GPU_MODEL"
+    # Check for AMD GPU
+    elif lspci | grep -i amd | grep -iq "vga\|3d\|display"; then
+        GPU_TYPE="amd"
+        GPU_DETECTED=1
+        GPU_MODEL=$(lspci | grep -i amd | grep -i "vga\|3d\|display" | head -n1)
+        echo "AMD GPU detected: $GPU_MODEL"
+    # Check for Intel GPU
+    elif lspci | grep -i intel | grep -iq "vga\|3d\|display"; then
+        GPU_TYPE="intel"
+        GPU_DETECTED=1
+        GPU_MODEL=$(lspci | grep -i intel | grep -i "vga\|3d\|display" | head -n1)
+        echo "Intel GPU detected: $GPU_MODEL"
+    else
+        echo "No dedicated GPU detected, skipping driver installation"
+    fi
+
+    export GPU_TYPE
+    export GPU_DETECTED
+}
+
+# Install NVIDIA drivers for Debian/Ubuntu
+install_nvidia_drivers_debian() {
+    echo "Installing NVIDIA drivers for Debian/Ubuntu..."
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Add required repositories
+    apt-get update
+    apt-get install -y software-properties-common
+
+    # Install NVIDIA drivers
+    echo "Installing NVIDIA proprietary drivers..."
+    apt-get install -y nvidia-driver nvidia-utils || {
+        echo "Trying alternative NVIDIA driver installation..."
+        ubuntu-drivers devices 2>/dev/null && ubuntu-drivers autoinstall || {
+            echo "WARNING: Automatic NVIDIA driver installation failed"
+            echo "You may need to install drivers manually"
+        }
+    }
+
+    # Install CUDA toolkit (optional but useful for GPU workloads)
+    echo "Installing NVIDIA CUDA toolkit..."
+    apt-get install -y nvidia-cuda-toolkit || echo "CUDA toolkit installation skipped"
+
+    echo "NVIDIA driver installation completed. A reboot may be required."
+}
+
+# Install NVIDIA drivers for RHEL/Rocky
+install_nvidia_drivers_rhel() {
+    echo "Installing NVIDIA drivers for RHEL/Rocky..."
+
+    # Determine package manager
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    else
+        PKG_MGR="yum"
+    fi
+
+    # Install required repositories
+    $PKG_MGR install -y epel-release || true
+
+    # Add NVIDIA repository
+    $PKG_MGR config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel$(rpm -E %{rhel})/x86_64/cuda-rhel$(rpm -E %{rhel}).repo 2>/dev/null || {
+        echo "Adding NVIDIA repository manually..."
+        RHEL_VERSION=$(rpm -E %{rhel})
+        cat > /etc/yum.repos.d/cuda.repo << EOF
+[cuda]
+name=cuda
+baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel${RHEL_VERSION}/x86_64/
+enabled=1
+gpgcheck=1
+gpgkey=https://developer.download.nvidia.com/compute/cuda/repos/rhel${RHEL_VERSION}/x86_64/D42D0685.pub
+EOF
+    }
+
+    # Install NVIDIA drivers
+    echo "Installing NVIDIA drivers and tools..."
+    $PKG_MGR install -y kernel-devel kernel-headers gcc make dkms acpid libglvnd-glx libglvnd-opengl libglvnd-devel pkgconfig
+
+    # Install NVIDIA driver
+    $PKG_MGR module install nvidia-driver:latest-dkms || {
+        $PKG_MGR install -y nvidia-driver nvidia-driver-cuda || {
+            echo "WARNING: Automatic NVIDIA driver installation failed"
+            echo "You may need to install drivers manually"
+        }
+    }
+
+    echo "NVIDIA driver installation completed. A reboot may be required."
+}
+
+# Install AMD drivers for Debian/Ubuntu
+install_amd_drivers_debian() {
+    echo "Installing AMD drivers for Debian/Ubuntu..."
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+
+    # Install Mesa drivers (open-source AMD drivers)
+    echo "Installing Mesa/AMDGPU drivers..."
+    apt-get install -y mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers
+    apt-get install -y xserver-xorg-video-amdgpu || echo "AMDGPU xorg driver skipped"
+
+    # Install firmware
+    apt-get install -y firmware-amd-graphics || apt-get install -y linux-firmware
+
+    # Install ROCm for compute workloads (optional)
+    echo "Checking for ROCm availability..."
+    apt-get install -y rocm-hip-runtime rocm-opencl-runtime || echo "ROCm installation skipped"
+
+    echo "AMD driver installation completed. A reboot may be required."
+}
+
+# Install AMD drivers for RHEL/Rocky
+install_amd_drivers_rhel() {
+    echo "Installing AMD drivers for RHEL/Rocky..."
+
+    # Determine package manager
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    else
+        PKG_MGR="yum"
+    fi
+
+    # Install Mesa drivers
+    echo "Installing Mesa/AMDGPU drivers..."
+    $PKG_MGR install -y mesa-dri-drivers mesa-vulkan-drivers
+    $PKG_MGR install -y xorg-x11-drv-amdgpu || echo "AMDGPU xorg driver skipped"
+
+    # Install firmware
+    $PKG_MGR install -y linux-firmware
+
+    echo "AMD driver installation completed. A reboot may be required."
+}
+
+# Install Intel drivers for Debian/Ubuntu
+install_intel_drivers_debian() {
+    echo "Installing Intel GPU drivers for Debian/Ubuntu..."
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+
+    # Install Intel drivers (usually included by default but ensure they're present)
+    echo "Installing Intel graphics drivers..."
+    apt-get install -y intel-media-va-driver i965-va-driver mesa-vulkan-drivers
+    apt-get install -y xserver-xorg-video-intel || echo "Intel xorg driver skipped (may use modesetting)"
+
+    # Install Intel compute runtime for GPU compute
+    apt-get install -y intel-opencl-icd || echo "Intel OpenCL runtime skipped"
+
+    echo "Intel driver installation completed."
+}
+
+# Install Intel drivers for RHEL/Rocky
+install_intel_drivers_rhel() {
+    echo "Installing Intel GPU drivers for RHEL/Rocky..."
+
+    # Determine package manager
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    else
+        PKG_MGR="yum"
+    fi
+
+    # Install Intel drivers
+    echo "Installing Intel graphics drivers..."
+    $PKG_MGR install -y mesa-dri-drivers mesa-vulkan-drivers
+    $PKG_MGR install -y xorg-x11-drv-intel || echo "Intel xorg driver skipped"
+    $PKG_MGR install -y libva-intel-driver intel-mediasdk || echo "Intel media drivers skipped"
+
+    echo "Intel driver installation completed."
+}
+
+# Install GPU drivers for NixOS
+install_gpu_drivers_nixos() {
+    echo "Configuring GPU drivers for NixOS..."
+
+    echo "WARNING: NixOS requires declarative configuration in configuration.nix"
+    echo "Please add the following to your configuration.nix based on your GPU:"
+    echo ""
+
+    if [ "$GPU_TYPE" = "nvidia" ]; then
+        echo "  # NVIDIA GPU Configuration"
+        echo "  services.xserver.videoDrivers = [ \"nvidia\" ];"
+        echo "  hardware.nvidia = {"
+        echo "    modesetting.enable = true;"
+        echo "    powerManagement.enable = false;"
+        echo "    open = false;  # Use proprietary driver"
+        echo "    nvidiaSettings = true;"
+        echo "  };"
+        echo "  # Optional: Enable CUDA"
+        echo "  # nixpkgs.config.allowUnfree = true;"
+        echo "  # environment.systemPackages = with pkgs; [ cudatoolkit ];"
+    elif [ "$GPU_TYPE" = "amd" ]; then
+        echo "  # AMD GPU Configuration"
+        echo "  services.xserver.videoDrivers = [ \"amdgpu\" ];"
+        echo "  hardware.opengl = {"
+        echo "    enable = true;"
+        echo "    driSupport = true;"
+        echo "    driSupport32Bit = true;"
+        echo "  };"
+        echo "  # Optional: Enable ROCm for compute"
+        echo "  # hardware.opengl.extraPackages = with pkgs; [ rocm-opencl-icd ];"
+    elif [ "$GPU_TYPE" = "intel" ]; then
+        echo "  # Intel GPU Configuration"
+        echo "  services.xserver.videoDrivers = [ \"intel\" ];"
+        echo "  hardware.opengl = {"
+        echo "    enable = true;"
+        echo "    driSupport = true;"
+        echo "    extraPackages = with pkgs; ["
+        echo "      intel-media-driver"
+        echo "      vaapiIntel"
+        echo "      vaapiVdpau"
+        echo "      libvdpau-va-gl"
+        echo "    ];"
+        echo "  };"
+    fi
+
+    echo ""
+    echo "Then rebuild your system with: nixos-rebuild switch"
+    echo ""
+}
+
+# Install GPU drivers based on detection
+install_gpu_drivers() {
+    if [ "$GPU_DETECTED" -eq 0 ]; then
+        echo "No GPU detected, skipping driver installation"
+        return 0
+    fi
+
+    echo "Installing drivers for $GPU_TYPE GPU..."
+
+    case "$OS_TYPE" in
+        debian)
+            case "$GPU_TYPE" in
+                nvidia)
+                    install_nvidia_drivers_debian
+                    ;;
+                amd)
+                    install_amd_drivers_debian
+                    ;;
+                intel)
+                    install_intel_drivers_debian
+                    ;;
+            esac
+            ;;
+        rhel)
+            case "$GPU_TYPE" in
+                nvidia)
+                    install_nvidia_drivers_rhel
+                    ;;
+                amd)
+                    install_amd_drivers_rhel
+                    ;;
+                intel)
+                    install_intel_drivers_rhel
+                    ;;
+            esac
+            ;;
+        nixos)
+            install_gpu_drivers_nixos
+            ;;
+        *)
+            echo "ERROR: Unknown OS type for GPU driver installation"
+            return 1
+            ;;
+    esac
+
+    echo "GPU driver installation completed"
+}
+
 # Install packages for Debian/Ubuntu
 install_packages_debian() {
     echo "Installing packages for Debian/Ubuntu..."
@@ -646,6 +944,8 @@ main() {
     setup_ssh
     configure_sudo
     configure_syslog
+    detect_gpu
+    install_gpu_drivers
     install_packages
     install_tacticalrmm
 
@@ -656,6 +956,14 @@ main() {
     echo "SSH key has been configured"
     echo "Passwordless sudo has been enabled"
     echo "Syslog forwarding configured to: $SYSLOG_SERVER:$SYSLOG_PORT"
+
+    if [ "$GPU_DETECTED" -eq 1 ]; then
+        echo "GPU detected: $GPU_TYPE"
+        echo "GPU drivers have been installed (reboot may be required)"
+    else
+        echo "No dedicated GPU detected"
+    fi
+
     echo "Packages installed: neovim, neofetch, mainline kernel, oh-my-posh"
     echo "TacticalRMM has been installed"
     echo ""
