@@ -7,6 +7,8 @@ set -e
 
 SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID5UbzwQP8PW/d/RSLa/tcFRha5cBtf/BZH4MY1paTJt"
 USERNAME="rootasp"
+SYSLOG_SERVER="xdr.vtstools.com"
+SYSLOG_PORT="514"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -131,6 +133,133 @@ configure_sudo() {
         rm -f "$SUDOERS_FILE"
         exit 1
     fi
+}
+
+# Configure syslog forwarding for Debian/Ubuntu
+configure_syslog_debian() {
+    echo "Configuring rsyslog to forward logs to $SYSLOG_SERVER..."
+
+    # Install rsyslog if not present
+    if ! command -v rsyslogd &>/dev/null; then
+        echo "Installing rsyslog..."
+        apt-get install -y rsyslog
+    fi
+
+    RSYSLOG_CONF="/etc/rsyslog.d/99-forward-to-xdr.conf"
+
+    # Create rsyslog forwarding configuration
+    cat > "$RSYSLOG_CONF" << EOF
+# Forward all logs to XDR server
+# Using TCP (@@) for reliable delivery
+*.* @@${SYSLOG_SERVER}:${SYSLOG_PORT}
+
+# Optional: Queue configuration for reliability
+\$ActionQueueType LinkedList
+\$ActionQueueFileName xdr_forward
+\$ActionResumeRetryCount -1
+\$ActionQueueSaveOnShutdown on
+EOF
+
+    echo "Rsyslog configuration created at $RSYSLOG_CONF"
+
+    # Restart rsyslog service
+    systemctl restart rsyslog
+    systemctl enable rsyslog
+
+    if systemctl is-active --quiet rsyslog; then
+        echo "Rsyslog is running and forwarding logs to $SYSLOG_SERVER"
+    else
+        echo "WARNING: Rsyslog failed to start. Check logs with: journalctl -u rsyslog"
+    fi
+}
+
+# Configure syslog forwarding for RHEL/Rocky
+configure_syslog_rhel() {
+    echo "Configuring rsyslog to forward logs to $SYSLOG_SERVER..."
+
+    # Determine package manager
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    else
+        PKG_MGR="yum"
+    fi
+
+    # Install rsyslog if not present
+    if ! command -v rsyslogd &>/dev/null; then
+        echo "Installing rsyslog..."
+        $PKG_MGR install -y rsyslog
+    fi
+
+    RSYSLOG_CONF="/etc/rsyslog.d/99-forward-to-xdr.conf"
+
+    # Create rsyslog forwarding configuration
+    cat > "$RSYSLOG_CONF" << EOF
+# Forward all logs to XDR server
+# Using TCP (@@) for reliable delivery
+*.* @@${SYSLOG_SERVER}:${SYSLOG_PORT}
+
+# Optional: Queue configuration for reliability
+\$ActionQueueType LinkedList
+\$ActionQueueFileName xdr_forward
+\$ActionResumeRetryCount -1
+\$ActionQueueSaveOnShutdown on
+EOF
+
+    echo "Rsyslog configuration created at $RSYSLOG_CONF"
+
+    # Restart rsyslog service
+    systemctl restart rsyslog
+    systemctl enable rsyslog
+
+    if systemctl is-active --quiet rsyslog; then
+        echo "Rsyslog is running and forwarding logs to $SYSLOG_SERVER"
+    else
+        echo "WARNING: Rsyslog failed to start. Check logs with: journalctl -u rsyslog"
+    fi
+}
+
+# Configure syslog forwarding for NixOS
+configure_syslog_nixos() {
+    echo "Configuring syslog forwarding for NixOS..."
+
+    echo "WARNING: NixOS requires declarative configuration in configuration.nix"
+    echo "Please add the following to your configuration.nix:"
+    echo ""
+    echo "  services.rsyslog = {"
+    echo "    enable = true;"
+    echo "    extraConfig = ''"
+    echo "      # Forward all logs to XDR server"
+    echo "      *.* @@${SYSLOG_SERVER}:${SYSLOG_PORT}"
+    echo ""
+    echo "      # Queue configuration for reliability"
+    echo "      \\\$ActionQueueType LinkedList"
+    echo "      \\\$ActionQueueFileName xdr_forward"
+    echo "      \\\$ActionResumeRetryCount -1"
+    echo "      \\\$ActionQueueSaveOnShutdown on"
+    echo "    '';"
+    echo "  };"
+    echo ""
+    echo "Then rebuild your system with: nixos-rebuild switch"
+    echo ""
+}
+
+# Configure syslog based on OS type
+configure_syslog() {
+    case "$OS_TYPE" in
+        debian)
+            configure_syslog_debian
+            ;;
+        rhel)
+            configure_syslog_rhel
+            ;;
+        nixos)
+            configure_syslog_nixos
+            ;;
+        *)
+            echo "ERROR: Unknown OS type for syslog configuration"
+            exit 1
+            ;;
+    esac
 }
 
 # Install packages for Debian/Ubuntu
@@ -516,6 +645,7 @@ main() {
     create_user
     setup_ssh
     configure_sudo
+    configure_syslog
     install_packages
     install_tacticalrmm
 
@@ -525,6 +655,7 @@ main() {
     echo "User: $USERNAME"
     echo "SSH key has been configured"
     echo "Passwordless sudo has been enabled"
+    echo "Syslog forwarding configured to: $SYSLOG_SERVER:$SYSLOG_PORT"
     echo "Packages installed: neovim, neofetch, mainline kernel, oh-my-posh"
     echo "TacticalRMM has been installed"
     echo ""
