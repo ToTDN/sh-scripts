@@ -705,7 +705,43 @@ install_packages() {
 
 # Install TacticalRMM
 install_tacticalrmm() {
-    echo "Installing TacticalRMM..."
+    echo "Checking TacticalRMM installation..."
+
+    # Define expected configuration
+    EXPECTED_API_URL="https://api.vtstools.com"
+    TRMM_AGENT_BIN="/usr/local/bin/tacticalagent"
+    TRMM_CONF="/etc/tacticalagent"
+    TRMM_SERVICE="tacticalagent.service"
+
+    # Check if TacticalRMM is already installed
+    if [ -f "$TRMM_AGENT_BIN" ] && [ -f "$TRMM_CONF" ]; then
+        echo "TacticalRMM agent found, checking configuration..."
+
+        # Check if it's pointing to the correct API server
+        if grep -q "$EXPECTED_API_URL" "$TRMM_CONF" 2>/dev/null; then
+            echo "TacticalRMM is already installed and configured for $EXPECTED_API_URL"
+
+            # Check if service is running
+            if systemctl is-active --quiet "$TRMM_SERVICE"; then
+                echo "TacticalRMM service is running"
+                echo "Skipping TacticalRMM installation"
+                return 0
+            else
+                echo "TacticalRMM service is not running, attempting to start..."
+                systemctl start "$TRMM_SERVICE" && {
+                    echo "TacticalRMM service started successfully"
+                    echo "Skipping TacticalRMM installation"
+                    return 0
+                }
+                echo "WARNING: Failed to start TacticalRMM service, proceeding with reinstallation..."
+            fi
+        else
+            echo "TacticalRMM is installed but configured for a different server"
+            echo "Proceeding with reinstallation for $EXPECTED_API_URL..."
+        fi
+    else
+        echo "TacticalRMM not found, proceeding with installation..."
+    fi
 
     if [ "$OS_TYPE" = "nixos" ]; then
         echo "WARNING: TacticalRMM installation on NixOS may require additional configuration"
