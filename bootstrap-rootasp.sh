@@ -573,9 +573,23 @@ install_packages_debian() {
     echo "Installing neovim..."
     apt-get install -y neovim
 
-    # Install neofetch
-    echo "Installing neofetch..."
-    apt-get install -y neofetch
+    # Install neofetch or fastfetch
+    echo "Installing neofetch/fastfetch..."
+    if ! apt-get install -y neofetch 2>/dev/null; then
+        echo "neofetch not available in repos, trying fastfetch..."
+        if ! apt-get install -y fastfetch 2>/dev/null; then
+            echo "fastfetch not available, installing neofetch manually from GitHub..."
+            wget -q https://github.com/dylanaraps/neofetch/archive/refs/tags/7.1.0.tar.gz -O /tmp/neofetch.tar.gz
+            tar -xzf /tmp/neofetch.tar.gz -C /tmp/
+            install -m 755 /tmp/neofetch-7.1.0/neofetch /usr/local/bin/neofetch
+            rm -rf /tmp/neofetch.tar.gz /tmp/neofetch-7.1.0
+            echo "neofetch installed manually"
+        else
+            echo "fastfetch installed as neofetch alternative"
+        fi
+    else
+        echo "neofetch installed successfully"
+    fi
 
     # Install mainline kernel (latest available)
     echo "Installing mainline kernel..."
@@ -610,9 +624,23 @@ install_packages_rhel() {
     echo "Installing neovim..."
     $PKG_MGR install -y neovim
 
-    # Install neofetch
-    echo "Installing neofetch..."
-    $PKG_MGR install -y neofetch
+    # Install neofetch or fastfetch
+    echo "Installing neofetch/fastfetch..."
+    if ! $PKG_MGR install -y neofetch 2>/dev/null; then
+        echo "neofetch not available in repos, trying fastfetch..."
+        if ! $PKG_MGR install -y fastfetch 2>/dev/null; then
+            echo "fastfetch not available, installing neofetch manually from GitHub..."
+            wget -q https://github.com/dylanaraps/neofetch/archive/refs/tags/7.1.0.tar.gz -O /tmp/neofetch.tar.gz
+            tar -xzf /tmp/neofetch.tar.gz -C /tmp/
+            install -m 755 /tmp/neofetch-7.1.0/neofetch /usr/local/bin/neofetch
+            rm -rf /tmp/neofetch.tar.gz /tmp/neofetch-7.1.0
+            echo "neofetch installed manually"
+        else
+            echo "fastfetch installed as neofetch alternative"
+        fi
+    else
+        echo "neofetch installed successfully"
+    fi
 
     # Install mainline kernel
     echo "Installing mainline kernel..."
@@ -637,7 +665,7 @@ install_packages_nixos() {
     echo "Please add the following packages to your configuration.nix:"
     echo "  environment.systemPackages = with pkgs; ["
     echo "    neovim"
-    echo "    neofetch"
+    echo "    fastfetch  # or neofetch if available"
     echo "    linuxPackages_latest.kernel"
     echo "    oh-my-posh"
     echo "  ];"
@@ -645,10 +673,13 @@ install_packages_nixos() {
     echo "Attempting to install packages imperatively (temporary)..."
 
     # Try to install packages using nix-env
-    nix-env -iA nixos.neovim nixos.neofetch nixos.oh-my-posh || {
+    nix-env -iA nixos.neovim nixos.oh-my-posh || {
         echo "WARNING: Some packages may not be available via nix-env"
         echo "Please use configuration.nix for proper NixOS setup"
     }
+
+    # Try to install neofetch or fastfetch
+    nix-env -iA nixos.neofetch 2>/dev/null || nix-env -iA nixos.fastfetch 2>/dev/null || echo "neofetch/fastfetch not installed"
 
     echo "Package installation attempted for NixOS"
 }
