@@ -10,6 +10,40 @@ USERNAME="rootasp"
 SYSLOG_SERVER="xdr.vtstools.com"
 SYSLOG_PORT="514"
 
+# Reboot tracking
+REBOOT_REQUIRED=0
+LOG_FILE="/var/log/bootstrap-rootasp.log"
+
+# Parse command line arguments
+AUTO_REBOOT=1
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --no-reboot) AUTO_REBOOT=0 ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --no-reboot    Skip automatic reboot at the end"
+            echo "  --help         Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Setup logging
+exec 1> >(tee -a "$LOG_FILE")
+exec 2>&1
+
+echo "=================================================="
+echo "Bootstrap script started at $(date)"
+echo "Log file: $LOG_FILE"
+echo "=================================================="
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     echo "ERROR: This script must be run as root"
@@ -332,7 +366,8 @@ install_nvidia_drivers_debian() {
     echo "Installing NVIDIA CUDA toolkit..."
     apt-get install -y nvidia-cuda-toolkit || echo "CUDA toolkit installation skipped"
 
-    echo "NVIDIA driver installation completed. A reboot may be required."
+    echo "NVIDIA driver installation completed. Reboot will be required."
+    REBOOT_REQUIRED=1
 }
 
 # Install NVIDIA drivers for RHEL/Rocky
@@ -375,7 +410,8 @@ EOF
         }
     }
 
-    echo "NVIDIA driver installation completed. A reboot may be required."
+    echo "NVIDIA driver installation completed. Reboot will be required."
+    REBOOT_REQUIRED=1
 }
 
 # Install AMD drivers for Debian/Ubuntu
@@ -398,7 +434,8 @@ install_amd_drivers_debian() {
     echo "Checking for ROCm availability..."
     apt-get install -y rocm-hip-runtime rocm-opencl-runtime || echo "ROCm installation skipped"
 
-    echo "AMD driver installation completed. A reboot may be required."
+    echo "AMD driver installation completed. Reboot will be required."
+    REBOOT_REQUIRED=1
 }
 
 # Install AMD drivers for RHEL/Rocky
@@ -420,7 +457,8 @@ install_amd_drivers_rhel() {
     # Install firmware
     $PKG_MGR install -y linux-firmware
 
-    echo "AMD driver installation completed. A reboot may be required."
+    echo "AMD driver installation completed. Reboot will be required."
+    REBOOT_REQUIRED=1
 }
 
 # Install Intel drivers for Debian/Ubuntu
@@ -439,7 +477,8 @@ install_intel_drivers_debian() {
     # Install Intel compute runtime for GPU compute
     apt-get install -y intel-opencl-icd || echo "Intel OpenCL runtime skipped"
 
-    echo "Intel driver installation completed."
+    echo "Intel driver installation completed. Reboot recommended."
+    REBOOT_REQUIRED=1
 }
 
 # Install Intel drivers for RHEL/Rocky
@@ -459,7 +498,8 @@ install_intel_drivers_rhel() {
     $PKG_MGR install -y xorg-x11-drv-intel || echo "Intel xorg driver skipped"
     $PKG_MGR install -y libva-intel-driver intel-mediasdk || echo "Intel media drivers skipped"
 
-    echo "Intel driver installation completed."
+    echo "Intel driver installation completed. Reboot recommended."
+    REBOOT_REQUIRED=1
 }
 
 # Install GPU drivers for NixOS
@@ -593,7 +633,10 @@ install_packages_debian() {
 
     # Install mainline kernel (latest available)
     echo "Installing mainline kernel..."
-    apt-get install -y linux-generic || apt-get install -y linux-image-generic
+    if apt-get install -y linux-generic || apt-get install -y linux-image-generic; then
+        echo "Kernel updated. Reboot will be required."
+        REBOOT_REQUIRED=1
+    fi
 
     # Install oh-my-posh
     echo "Installing oh-my-posh..."
@@ -644,7 +687,10 @@ install_packages_rhel() {
 
     # Install mainline kernel
     echo "Installing mainline kernel..."
-    $PKG_MGR install -y kernel kernel-devel
+    if $PKG_MGR install -y kernel kernel-devel; then
+        echo "Kernel updated. Reboot will be required."
+        REBOOT_REQUIRED=1
+    fi
 
     # Install oh-my-posh
     echo "Installing oh-my-posh..."
@@ -705,7 +751,43 @@ install_packages() {
 
 # Install TacticalRMM
 install_tacticalrmm() {
-    echo "Installing TacticalRMM..."
+    echo "Checking TacticalRMM installation..."
+
+    # Define expected configuration
+    EXPECTED_API_URL="https://api.vtstools.com"
+    TRMM_AGENT_BIN="/usr/local/bin/tacticalagent"
+    TRMM_CONF="/etc/tacticalagent"
+    TRMM_SERVICE="tacticalagent.service"
+
+    # Check if TacticalRMM is already installed
+    if [ -f "$TRMM_AGENT_BIN" ] && [ -f "$TRMM_CONF" ]; then
+        echo "TacticalRMM agent found, checking configuration..."
+
+        # Check if it's pointing to the correct API server
+        if grep -q "$EXPECTED_API_URL" "$TRMM_CONF" 2>/dev/null; then
+            echo "TacticalRMM is already installed and configured for $EXPECTED_API_URL"
+
+            # Check if service is running
+            if systemctl is-active --quiet "$TRMM_SERVICE"; then
+                echo "TacticalRMM service is running"
+                echo "Skipping TacticalRMM installation"
+                return 0
+            else
+                echo "TacticalRMM service is not running, attempting to start..."
+                systemctl start "$TRMM_SERVICE" && {
+                    echo "TacticalRMM service started successfully"
+                    echo "Skipping TacticalRMM installation"
+                    return 0
+                }
+                echo "WARNING: Failed to start TacticalRMM service, proceeding with reinstallation..."
+            fi
+        else
+            echo "TacticalRMM is installed but configured for a different server"
+            echo "Proceeding with reinstallation for $EXPECTED_API_URL..."
+        fi
+    else
+        echo "TacticalRMM not found, proceeding with installation..."
+    fi
 
     if [ "$OS_TYPE" = "nixos" ]; then
         echo "WARNING: TacticalRMM installation on NixOS may require additional configuration"
@@ -990,7 +1072,7 @@ main() {
 
     if [ "$GPU_DETECTED" -eq 1 ]; then
         echo "GPU detected: $GPU_TYPE"
-        echo "GPU drivers have been installed (reboot may be required)"
+        echo "GPU drivers have been installed"
     else
         echo "No dedicated GPU detected"
     fi
@@ -1005,6 +1087,46 @@ main() {
         echo "IMPORTANT: On NixOS, please add the user configuration to /etc/nixos/configuration.nix"
         echo "for persistent configuration across rebuilds."
     fi
+
+    echo ""
+    echo "=================================================="
+    echo "Bootstrap script completed at $(date)"
+    echo "Log file: $LOG_FILE"
+    echo "=================================================="
+
+    # Handle reboot if required
+    if [ "$REBOOT_REQUIRED" -eq 1 ]; then
+        echo ""
+        echo "!!! REBOOT REQUIRED !!!"
+        echo "Changes have been made that require a system reboot to take effect:"
+        echo "  - Kernel updates"
+        echo "  - GPU driver installation"
+        echo ""
+
+        if [ "$AUTO_REBOOT" -eq 1 ]; then
+            echo "System will automatically reboot in 30 seconds..."
+            echo "Press Ctrl+C to cancel the reboot"
+            echo ""
+
+            for i in {30..1}; do
+                echo -ne "Rebooting in $i seconds...\r"
+                sleep 1
+            done
+
+            echo ""
+            echo "Rebooting now..."
+            sync
+            reboot
+        else
+            echo "Automatic reboot is disabled (--no-reboot flag)"
+            echo "Please reboot the system manually to complete the installation:"
+            echo "  sudo reboot"
+            echo ""
+        fi
+    else
+        echo ""
+        echo "No reboot is required. All changes are active."
+    fi
 }
 
-main "$@"
+main
